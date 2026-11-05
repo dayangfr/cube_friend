@@ -8,6 +8,13 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* 
 
 #define BUTTON_PIN 3
 #define BUZZER_PIN 2
+#define LEFT_ARM_PIN 0
+#define RIGHT_ARM_PIN 1
+
+static const uint32_t SERVO_FREQUENCY = 50;
+static const uint8_t SERVO_RESOLUTION = 14;
+static const float ARM_DOWN_ANGLE = 45.0f;
+static const float ARM_UP_ANGLE = 135.0f;
 
 // =====================================================================
 //  Layout / tuning
@@ -83,6 +90,14 @@ static unsigned long lastFrame = 0;
 // =====================================================================
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 static inline void approach(float &c, float t, float a) { c += (t - c) * a; }
+
+static void writeServoAngle(uint8_t pin, float angle) {
+    angle = constrain(angle, 0.0f, 180.0f);
+    uint32_t pulseUs = 500 + (uint32_t)lroundf(angle * 2000.0f / 180.0f);
+    uint32_t maxDuty = (1UL << SERVO_RESOLUTION) - 1;
+    uint32_t duty = pulseUs * maxDuty / 20000;
+    ledcWrite(pin, duty);
+}
 
 static void approachShape(EyeShape &c, const EyeShape &t, float a) {
     approach(c.w, t.w, a);   approach(c.h, t.h, a);
@@ -187,6 +202,12 @@ static void updateHappy(unsigned long now, bool pressed) {
     if (pressed && now + 1200 > happyUntil) happyUntil = now + 1200;   // holding the button keeps it going
     if (now >= happyUntil) { endHappy(now); return; }
     if (curPose == P_HAPPY_PRE && now - happyStart >= 150) setPose(P_HAPPY);
+}
+
+static void updateArms() {
+    float leftAngle = mode == M_HAPPY ? ARM_UP_ANGLE : ARM_DOWN_ANGLE;
+    writeServoAngle(LEFT_ARM_PIN, leftAngle);
+    writeServoAngle(RIGHT_ARM_PIN, 180.0f - leftAngle);
 }
 
 // =====================================================================
@@ -418,6 +439,10 @@ void setup() {
     u8g2.begin();
     pinMode(BUTTON_PIN, INPUT_PULLDOWN);
     pinMode(BUZZER_PIN, OUTPUT);
+    ledcAttach(LEFT_ARM_PIN, SERVO_FREQUENCY, SERVO_RESOLUTION);
+    ledcAttach(RIGHT_ARM_PIN, SERVO_FREQUENCY, SERVO_RESOLUTION);
+    writeServoAngle(LEFT_ARM_PIN, ARM_DOWN_ANGLE);
+    writeServoAngle(RIGHT_ARM_PIN, 180.0f - ARM_DOWN_ANGLE);
 
     curiousSide = 0;
     setPose(P_NORMAL);
@@ -444,6 +469,7 @@ void loop() {
 
     if (mode == M_HAPPY) updateHappy(now, pressed);
     else                 updateIdle(now);
+    updateArms();
 
     updateLook(now);
     updateBlink(now);
