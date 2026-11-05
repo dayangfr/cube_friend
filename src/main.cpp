@@ -81,6 +81,8 @@ static bool prevPressed = false;
 
 static bool scanActive = false;
 static unsigned long scanStart = 0;
+static bool helloActive = false;            // "hello" idle action: wave right arm + "Hi!" on screen
+static unsigned long helloStart = 0;
 static unsigned long nextActionAt = 0, actionEndAt = 0;
 
 static unsigned long lastFrame = 0;
@@ -174,6 +176,7 @@ static void startHappy(unsigned long now) {
     happySoundSecondAt = now + 140;
     happySoundPending = true;
     scanActive = false;
+    helloActive = false;
     lockGaze = true;
     blinkActive = false;
     blinkPending2 = false;
@@ -206,8 +209,14 @@ static void updateHappy(unsigned long now, bool pressed) {
 
 static void updateArms() {
     float leftAngle = mode == M_HAPPY ? ARM_UP_ANGLE : ARM_DOWN_ANGLE;
+    float rightAngle = 180.0f - leftAngle;
+    if (mode == M_IDLE && helloActive) {
+        // right arm goes up and waves left-right around the "up" position
+        float t = (float)(millis() - helloStart);
+        rightAngle = (180.0f - ARM_UP_ANGLE) + sinf(t * 0.018f) * 22.0f;
+    }
     writeServoAngle(LEFT_ARM_PIN, leftAngle);
-    writeServoAngle(RIGHT_ARM_PIN, 180.0f - leftAngle);
+    writeServoAngle(RIGHT_ARM_PIN, rightAngle);
 }
 
 // =====================================================================
@@ -217,29 +226,37 @@ static void startIdleAction(unsigned long now) {
     int r = random(100);
     lockGaze = true;
     scanActive = false;
+    helloActive = false;
 
-    if (r < 16) {                               // look left - right - centre
+    if (r < 14) {                               // look left - right - centre
         scanActive = true;
         scanStart = now;
         actionEndAt = now + 1000;
         setPose(P_NORMAL);
-    } else if (r < 32) {                        // squint
+    } else if (r < 28) {                        // squint
         lockGaze = false;
         actionEndAt = now + random(1500, 2500);
         setPose(P_SQUINT);
-    } else if (r < 52) {                        // curious: one eye bigger, look up at it
+    } else if (r < 46) {                        // curious: one eye bigger, look up at it
         curiousSide = random(2);
         actionEndAt = now + random(1600, 2600);
         setPose(P_CURIOUS);
         setGaze(curiousSide ? 0.6f : -0.6f, -0.5f, 90);
-    } else if (r < 66) {                        // sleepy
+    } else if (r < 58) {                        // sleepy
         actionEndAt = now + random(2200, 3200);
         setPose(P_SLEEPY);
         setGaze(0, 0.5f, 250);
-    } else if (r < 80) {                        // surprised
+    } else if (r < 70) {                        // surprised
         actionEndAt = now + random(900, 1400);
         setPose(P_WIDE);
         setGaze(0, 0, 45);
+    } else if (r < 82) {                        // hello: wave right hand, show "Hi!"
+        helloActive = true;
+        helloStart = now;
+        actionEndAt = now + 2800;
+        setPose(P_HAPPY);
+        setGaze(0.3f, 0, 80);
+        tone(BUZZER_PIN, 988, 80);
     } else {                                    // focused
         actionEndAt = now + random(1500, 2500);
         setPose(P_FOCUSED);
@@ -249,6 +266,7 @@ static void startIdleAction(unsigned long now) {
 
 static void endIdleAction(unsigned long now) {
     scanActive = false;
+    helloActive = false;
     lockGaze = false;
     actionEndAt = 0;
     setPose(P_NORMAL);
@@ -404,6 +422,14 @@ static void render() {
         float cx = (i == 1 ? EYE_CX_R : EYE_CX_L) + gazeX * LOOK_X;
         float cy = EYE_CY + gazeY * LOOK_Y;
         drawEye(cx, cy, s, blinkAmount, i == 1);
+    }
+
+    if (mode == M_IDLE && helloActive) {
+        // "Hi!" centred under the eyes
+        u8g2.setFont(u8g2_font_helvB14_tr);
+        u8g2.setDrawColor(1);
+        int tw = u8g2.getStrWidth("Hi");
+        u8g2.drawStr((128 - tw) / 2, 63, "Hi");
     }
 
     if (mode == M_HAPPY) {
