@@ -7,6 +7,7 @@
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ 9, /* data=*/ 8);
 
 #define BUTTON_PIN 3
+#define BUZZER_PIN 2
 
 // =====================================================================
 //  Layout / tuning
@@ -67,6 +68,8 @@ static float bClose = 70, bHold = 25, bOpen = 130;
 // modes / idle actions
 static Mode mode = M_IDLE;
 static unsigned long happyStart = 0, happyUntil = 0;
+static unsigned long happySoundSecondAt = 0;
+static bool happySoundPending = false;
 static bool prevPressed = false;
 
 static bool scanActive = false;
@@ -152,12 +155,22 @@ static void startHappy(unsigned long now) {
     mode = M_HAPPY;
     happyStart = now;
     happyUntil = now + HAPPY_MS;
+    tone(BUZZER_PIN, 880, 100);
+    happySoundSecondAt = now + 140;
+    happySoundPending = true;
     scanActive = false;
     lockGaze = true;
     blinkActive = false;
     blinkPending2 = false;
     setGaze(0, 0, 80);
     setPose(P_HAPPY_PRE);
+}
+// sound is played a little after the button press, so it doesn't get cut off by the first blink
+static void updateHappySound(unsigned long now) {
+    if (happySoundPending && now >= happySoundSecondAt) {
+        tone(BUZZER_PIN, 1175, 150);
+        happySoundPending = false;
+    }
 }
 
 static void endHappy(unsigned long now) {
@@ -404,6 +417,7 @@ void setup() {
     u8g2.setBusClock(400000);
     u8g2.begin();
     pinMode(BUTTON_PIN, INPUT_PULLDOWN);
+    pinMode(BUZZER_PIN, OUTPUT);
 
     curiousSide = 0;
     setPose(P_NORMAL);
@@ -426,6 +440,7 @@ void loop() {
     bool pressed = (digitalRead(BUTTON_PIN) == HIGH);
     if (pressed && !prevPressed && mode == M_IDLE) startHappy(now);
     prevPressed = pressed;
+    updateHappySound(now);
 
     if (mode == M_HAPPY) updateHappy(now, pressed);
     else                 updateIdle(now);
