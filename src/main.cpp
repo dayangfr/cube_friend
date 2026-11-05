@@ -35,6 +35,13 @@ struct EyeShape {
     float tilt;      // top lid slope in px: >0 inner corner lowered (focused), <0 outer corner lowered (sleepy)
 };
 
+static const int HEART_POS[4][2] = {
+    {10, 32},   // Левый бок
+    {118, 19},  // Правый бок
+    {35, 53},   // Снизу слева
+    {93, 60}    // Снизу справа
+};
+
 enum Pose { P_NORMAL, P_SQUINT, P_CURIOUS, P_SLEEPY, P_WIDE, P_FOCUSED, P_HAPPY_PRE, P_HAPPY };
 enum Mode { M_IDLE, M_HAPPY };
 
@@ -285,6 +292,23 @@ static void updateBlink(unsigned long now) {
 // =====================================================================
 //  Drawing
 // =====================================================================
+
+// Координаты для 4 маленьких сердечек: {x, y}
+static void drawMiniHeart(int xm, int ym, int offsetX, int offsetY) {
+    xm += offsetX;
+    ym += offsetY;
+    u8g2.setDrawColor(1);
+    u8g2.drawBox(xm - 2, ym - 2, 2, 1); 
+    u8g2.drawBox(xm + 1, ym - 2, 2, 1); 
+    u8g2.drawBox(xm - 3, ym - 1, 7, 1); 
+    u8g2.drawBox(xm - 3, ym,     7, 1); 
+    u8g2.drawBox(xm - 2, ym + 1, 5, 1); 
+    u8g2.drawBox(xm - 1, ym + 2, 3, 1); 
+    u8g2.drawPixel(xm,   ym + 3);       
+}
+
+
+
 static void drawEye(float cx, float cy, const EyeShape &s, float blink, bool isRight) {
     // blink: squash to a thin line and widen a little
     float h = s.h + (3.0f - s.h) * blink;
@@ -335,6 +359,7 @@ static void drawEye(float cx, float cy, const EyeShape &s, float blink, bool isR
 }
 
 static void render() {
+    unsigned long now = millis();
     u8g2.clearBuffer();
     for (int i = 0; i < 2; i++) {
         EyeShape s = cur[i];
@@ -346,6 +371,29 @@ static void render() {
         float cy = EYE_CY + gazeY * LOOK_Y;
         drawEye(cx, cy, s, blinkAmount, i == 1);
     }
+
+    if (mode == M_HAPPY) {
+        for (int i = 0; i < 4; i++) {
+            int offX = 0;
+            int offY = 0;
+
+            if (i == 0) { // Левое сердечко
+                offX = (int)lroundf(sinf(now * 0.008f) * 1.5f);
+                offY = (int)lroundf(cosf(now * 0.006f) * 1.0f);
+            } else if (i == 1) { // Правое сердечко
+                offX = (int)lroundf(sinf(now * 0.007f + 2.0f) * 1.5f);
+                offY = (int)lroundf(sinf(now * 0.009f) * 1.5f);
+            } else if (i == 2) { // Снизу слева
+                offY = (int)lroundf(sinf(now * 0.012f) * 2.0f);
+            } else if (i == 3) { // Снизу справа
+                offX = (int)lroundf(cosf(now * 0.010f + 1.0f) * 1.5f);
+                offY = (int)lroundf(sinf(now * 0.011f) * 2.0f);
+            }
+
+            drawMiniHeart(HEART_POS[i][0], HEART_POS[i][1], offX, offY);
+        }
+    }
+
     u8g2.sendBuffer();
 }
 
