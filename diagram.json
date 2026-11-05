@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "author": "Anonymous",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-c3-devkitm-1", "id": "esp32", "top": -48, "left": -110.4, "attrs": {} },
+    { "type": "board-ssd1306", "id": "oled", "top": -67.2, "left": 134.4, "attrs": {} },
+    { "type": "wokwi-pushbutton", "id": "btn", "top": 115.2, "left": 182.4, "attrs": { "color": "green" } }
+  ],
+  "connections": [
+    [ "esp32:GND.1", "oled:GND", "blue", [ "v-118.4", "h291.8", "v82.5" ] ],
+    [ "esp32:3V3.1", "oled:VCC", "red", [ "h-11.2", "v-144.8", "h315.8", "v97.5" ] ],
+    [ "esp32:9", "oled:SCL", "orange", [ "v-146.2", "h196.5", "v57.8" ] ],
+    [ "esp32:8", "oled:SDA", "green", [ "h10.5", "v-171", "h196.5", "v70.5" ] ],
+    [ "esp32:3V3.2", "btn:1.l", "green", [ "h-37.5", "v196.5", "h236.2", "v-77.2", "h96" ] ],
+    [ "esp32:3", "btn:2.l", "red", [ "h-11.2", "v222.8", "h303.8", "v-104.2" ] ]
+  ],
+  "dependencies": {}
+}
