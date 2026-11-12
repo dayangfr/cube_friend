@@ -2,6 +2,11 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <math.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 // SSD1306 128x64 over I2C. ESP32-C3 Super Mini default pins: SDA = 8, SCL = 9
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ 9, /* data=*/ 8);
@@ -15,6 +20,15 @@ static const uint32_t SERVO_FREQUENCY = 50;
 static const uint8_t SERVO_RESOLUTION = 14;
 static const float ARM_DOWN_ANGLE = 45.0f;
 static const float ARM_UP_ANGLE = 135.0f;
+static const char* BLE_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+static const char* BLE_RX_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+static const size_t BLE_COMMAND_SIZE = 64;
+
+struct BleCommand {
+    char text[BLE_COMMAND_SIZE];
+};
+
+static QueueHandle_t bleCommandQueue = nullptr;
 
 // =====================================================================
 //  Layout / tuning
@@ -51,7 +65,7 @@ static const int HEART_POS[4][2] = {
 };
 
 enum Pose { P_NORMAL, P_SQUINT, P_CURIOUS, P_SLEEPY, P_WIDE, P_FOCUSED, P_HAPPY_PRE, P_HAPPY };
-enum Mode { M_IDLE, M_HAPPY };
+enum Mode { M_IDLE, M_HAPPY, M_NOTIFY };
 
 static EyeShape pose[2];            // target shape of each eye for the current pose
 static EyeShape cur[2];             // what is actually displayed
@@ -77,6 +91,8 @@ static Mode mode = M_IDLE;
 static unsigned long happyStart = 0, happyUntil = 0;
 static unsigned long happySoundSecondAt = 0;
 static bool happySoundPending = false;
+static unsigned long notifyUntil = 0;
+static char notifyText[BLE_COMMAND_SIZE] = "";
 static bool prevPressed = false;
 
 static bool scanActive = false;
@@ -86,6 +102,58 @@ static unsigned long helloStart = 0;
 static unsigned long nextActionAt = 0, actionEndAt = 0;
 
 static unsigned long lastFrame = 0;
+
+// =====================================================================
+//  Bluetooth initialization
+// =====================================================================
+
+class BleCommandCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic* characteristic) override {
+        String value = characteristic->getValue();
+        size_t length = value.length();
+        while (length > 0 && (value[length - 1] == '\r' || value[length - 1] == '\n')) {
+            value.remove(length - 1);
+            --length;
+        }
+        if (length == 0 || length >= BLE_COMMAND_SIZE) {
+            Serial.println("BLE command rejected: empty or too long");
+            return;
+        }
+
+        BleCommand command = {};
+        memcpy(command.text, value.c_str(), length);
+        if (bleCommandQueue == nullptr || xQueueSend(bleCommandQueue, &command, 0) != pdTRUE) {
+            Serial.println("BLE command rejected: command queue is full or unavailable");
+        }
+    }
+};
+
+class BleConnectionCallbacks : public BLEServerCallbacks {
+    void onDisconnect(BLEServer*) override {
+        BLEDevice::startAdvertising();
+    }
+};
+
+static void initializeBle() {
+    BLEDevice::init("Cube Friend");
+    esp_err_t mtuStatus = BLEDevice::setMTU(128);
+    if (mtuStatus != ESP_OK) {
+        Serial.printf("BLE MTU configuration failed: %s\n", esp_err_to_name(mtuStatus));
+    }
+    BLEServer* server = BLEDevice::createServer();
+    server->setCallbacks(new BleConnectionCallbacks());
+    BLEService* service = server->createService(BLE_SERVICE_UUID);
+    BLECharacteristic* rx = service->createCharacteristic(
+        BLE_RX_UUID,
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
+    );
+    rx->setCallbacks(new BleCommandCallbacks());
+    service->start();
+
+    BLEAdvertising* advertising = BLEDevice::getAdvertising();
+    advertising->addServiceUUID(BLE_SERVICE_UUID);
+    BLEDevice::startAdvertising();
+}
 
 // =====================================================================
 //  Helpers
@@ -163,6 +231,191 @@ static void startBlink(unsigned long now) {
     blinkStart = now;
     if (curPose == P_SLEEPY) { bClose = 170; bHold = 110; bOpen = 260; }   // lazy blink
     else                     { bClose = 70;  bHold = 25;  bOpen = 130; }
+}
+// =====================================================================
+//  Notification mode
+// =====================================================================
+
+static void startNotify(unsigned long now) {
+    mode = M_NOTIFY;
+    notifyUntil = now + 5000;
+    happySoundPending = false;
+    scanActive = false;
+    helloActive = false;
+    actionEndAt = 0;
+    lockGaze = true;
+    blinkActive = false;
+    blinkPending2 = false;
+    setGaze(0, 0, 80);
+    setPose(P_NORMAL);
+    tone(BUZZER_PIN, 988, 110);
+}
+
+static void endNotify(unsigned long now) {
+    mode = M_IDLE;
+    lockGaze = false;
+    notifyText[0] = '\0';
+    setPose(P_NORMAL);
+    nextBlinkAt = now + 150;
+    nextLookAt = now + 1500;
+    nextActionAt = now + random(3500, 7000);
+    actionEndAt = 0;
+}
+
+static void updateNotify(unsigned long now) {
+    if (now >= notifyUntil) endNotify(now);
+}
+
+static void startHappy(unsigned long now);
+
+static bool isAscii(const char* text) {
+    for (const unsigned char* p = (const unsigned char*)text; *p; ++p) {
+        if (*p >= 0x80) return false;
+    }
+    return true;
+}
+
+static void drawCenteredText(const char* text, int y) {
+    int width = isAscii(text) ? u8g2.getStrWidth(text) : u8g2.getUTF8Width(text);
+    int x = clampi((128 - width) / 2, 0, 127);
+    if (isAscii(text)) u8g2.drawStr(x, y, text);
+    else               u8g2.drawUTF8(x, y, text);
+}
+
+static void drawNotification() {
+    u8g2.setFont(u8g2_font_6x13_t_cyrillic);
+    u8g2.setDrawColor(1);
+
+    char lines[5][BLE_COMMAND_SIZE] = {};
+    size_t lineCount = 1;
+    size_t lineLength = 0;
+    const char* p = notifyText;
+
+    while (*p && lineCount <= 5) {
+        size_t charLength = 1;
+        unsigned char first = (unsigned char)*p;
+        if ((first & 0xE0) == 0xC0) charLength = 2;
+        else if ((first & 0xF0) == 0xE0) charLength = 3;
+        else if ((first & 0xF8) == 0xF0) charLength = 4;
+
+        char candidate[BLE_COMMAND_SIZE];
+        memcpy(candidate, lines[lineCount - 1], lineLength);
+        memcpy(candidate + lineLength, p, charLength);
+        candidate[lineLength + charLength] = '\0';
+
+        if (lineLength > 0 && u8g2.getUTF8Width(candidate) > 124) {
+            ++lineCount;
+            if (lineCount > 5) {
+                lineCount = 5;
+                break;
+            }
+            lineLength = 0;
+            if (*p == ' ') {
+                ++p;
+                continue;
+            }
+        }
+
+        memcpy(lines[lineCount - 1] + lineLength, p, charLength);
+        lineLength += charLength;
+        lines[lineCount - 1][lineLength] = '\0';
+        p += charLength;
+    }
+
+    int firstBaseline = (64 - (int)lineCount * 13) / 2 + 10;
+    for (size_t i = 0; i < lineCount; ++i) {
+        drawCenteredText(lines[i], firstBaseline + (int)i * 13);
+    }
+}
+
+static void handleBleCommand(const char* command, unsigned long now) {
+    if (strncmp(command, "MSG:", 4) == 0 && command[4] != '\0') {
+        const char* message = command + 4;
+        if (strcmp(message, "TG") == 0) message = "У вас новое сообщение в Telegram";
+        snprintf(notifyText, sizeof(notifyText), "%s", message);
+        startNotify(now);
+    } else if (strncmp(command, "REM:", 4) == 0 && command[4] != '\0') {
+        snprintf(notifyText, sizeof(notifyText), "%s", command + 4);
+        startNotify(now);
+    } else if (strcmp(command, "CMD:HAPPY") == 0) {
+        startHappy(now);
+    } else if (strcmp(command, "CMD:CURIOUS") == 0) {
+        mode = M_IDLE;
+        happySoundPending = false;
+        scanActive = false;
+        helloActive = false;
+        lockGaze = true;
+        curiousSide = random(2);
+        setGaze(curiousSide ? 0.6f : -0.6f, -0.5f, 90);
+        setPose(P_CURIOUS);
+        actionEndAt = now + 5000;
+    } else if (strcmp(command, "CMD:WIDE") == 0) {
+        mode = M_IDLE;
+        happySoundPending = false;
+        scanActive = false;
+        helloActive = false;
+        lockGaze = true;
+        setGaze(0, 0, 45);
+        setPose(P_WIDE);
+        actionEndAt = now + 5000;
+    } else if (strcmp(command, "CMD:SLEEPY") == 0) {
+        mode = M_IDLE;
+        happySoundPending = false;
+        scanActive = false;
+        helloActive = false;
+        lockGaze = true;
+        setGaze(0, 0.5f, 250);
+        setPose(P_SLEEPY);
+        actionEndAt = now + 5000;
+    } else if (strcmp(command, "CMD:FOCUSED") == 0) {
+        mode = M_IDLE;
+        happySoundPending = false;
+        scanActive = false;
+        helloActive = false;
+        lockGaze = true;
+        setGaze(0, 0, 100);
+        setPose(P_FOCUSED);
+        actionEndAt = now + 5000;
+    } else if (strcmp(command, "CMD:HELLO") == 0) {
+        mode = M_IDLE;
+        happySoundPending = false;
+        scanActive = false;
+        helloActive = true;
+        helloStart = now;
+        lockGaze = true;
+        setGaze(0.3f, 0, 80);
+        setPose(P_HAPPY);
+        actionEndAt = now + 5000;
+    } else if (strcmp(command, "CMD:NORMAL") == 0) {
+        mode = M_IDLE;
+        happySoundPending = false;
+        scanActive = false;
+        helloActive = false;
+        lockGaze = true;
+        setGaze(0, 0, 100);
+        setPose(P_NORMAL);
+        actionEndAt = now + 5000;
+    } else if (strcmp(command, "CMD:SQUINT") == 0) {
+        mode = M_IDLE;
+        happySoundPending = false;
+        scanActive = false;
+        helloActive = false;
+        lockGaze = true;
+        setGaze(0, 0, 100);
+        setPose(P_SQUINT);
+        actionEndAt = now + 5000;
+    } else {
+        Serial.print("Unknown BLE command: ");
+        Serial.println(command);
+    }
+}
+
+static void processBleCommands(unsigned long now) {
+    if (bleCommandQueue == nullptr) return;
+    BleCommand command;
+    while (xQueueReceive(bleCommandQueue, &command, 0) == pdTRUE) {
+        handleBleCommand(command.text, now);
+    }
 }
 
 // =====================================================================
@@ -312,7 +565,7 @@ static void updateLook(unsigned long now) {
 //  Blink: fast eased close, tiny hold, slower eased open (+ occasional double blink)
 // =====================================================================
 static void updateBlink(unsigned long now) {
-    if (mode == M_HAPPY) { blinkActive = false; blinkAmount = 0; return; }
+    if (mode != M_IDLE) { blinkActive = false; blinkAmount = 0; return; }
 
     if (!blinkActive) {
         blinkAmount = 0;
@@ -413,6 +666,12 @@ static void drawEye(float cx, float cy, const EyeShape &s, float blink, bool isR
 static void render() {
     unsigned long now = millis();
     u8g2.clearBuffer();
+    if (mode == M_NOTIFY) {
+        drawNotification();
+        u8g2.sendBuffer();
+        return;
+    }
+
     for (int i = 0; i < 2; i++) {
         EyeShape s = cur[i];
         float side = (i == 1) ? 1.0f : -1.0f;
@@ -461,6 +720,14 @@ static void render() {
 //  Setup / loop
 // =====================================================================
 void setup() {
+    Serial.begin(115200);
+    bleCommandQueue = xQueueCreate(4, sizeof(BleCommand));
+    if (bleCommandQueue != nullptr) {
+        initializeBle();
+    } else {
+        Serial.println("BLE unavailable: could not create command queue");
+    }
+
     u8g2.setBusClock(400000);
     u8g2.begin();
     pinMode(BUTTON_PIN, INPUT_PULLDOWN);
@@ -484,6 +751,7 @@ void setup() {
 
 void loop() {
     unsigned long now = millis();
+    processBleCommands(now);
     if (now - lastFrame < FRAME_MS) return;
     float dt = (float)(now - lastFrame);
     lastFrame = now;
@@ -493,8 +761,9 @@ void loop() {
     prevPressed = pressed;
     updateHappySound(now);
 
-    if (mode == M_HAPPY) updateHappy(now, pressed);
-    else                 updateIdle(now);
+    if (mode == M_HAPPY)       updateHappy(now, pressed);
+    else if (mode == M_NOTIFY) updateNotify(now);
+    else                      updateIdle(now);
     updateArms();
 
     updateLook(now);
